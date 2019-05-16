@@ -41,7 +41,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
 
     private static void setupDecoder(Surface decoderSurface) throws IOException {
         decoder = MediaCodec.createDecoderByType("video/avc");
-        MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1080, 2220);
+        MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1080, 2280);
         decoder.configure(format, decoderSurface, null, 0);
         decoder.start();
     }
@@ -75,7 +75,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         buf[1] = 0x00;
         buf[2] = 0x00;
         buf[3] = 0x01;
-        while ((read = in.read(buf, total, 4)) != -1) {
+        while ((read = in.read(buf, total, 1)) != -1) {
             total += read;
             if (buf[total - 4] != 0x00 ||
                     buf[total - 3] != 0x00 ||
@@ -85,9 +85,9 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
 
             Log.e(Streamer.APP_NAME, "Read " + total + " bytes");
 
-            inputIndex = decoder.dequeueInputBuffer(10000);
-            if (inputIndex < 0)
-               continue;
+            do {
+                inputIndex = decoder.dequeueInputBuffer(10000);
+            } while (inputIndex < 0);
 
             inputBuffer = decoder.getInputBuffer(inputIndex);
             inputBuffer.put(buf, 0, total);
@@ -106,7 +106,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
             buf[3] = 0x01;
             total = 4;
 
-            outIndex = decoder.dequeueOutputBuffer(info, 0);
+            outIndex = decoder.dequeueOutputBuffer(info, 10000);
 
             switch (outIndex) {
                 case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
@@ -141,7 +141,15 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
 
         setContentView(R.layout.activity_fullscreen);
 
-        //getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        this.getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
         SurfaceView sv = findViewById(R.id.surfaceView);
         sv.getHolder().addCallback(this);
