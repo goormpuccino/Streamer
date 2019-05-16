@@ -13,6 +13,9 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.WindowManager;
+
+import com.google.common.primitives.Bytes;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -24,25 +27,31 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.security.spec.ECField;
+import java.util.Arrays;
 
 public class FullscreenActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     private static final int portNumber = 5567;
     private static MediaCodec decoder = null;
     private PlayerThread mPlayer = null;
 
+    private static ServerSocket serverSocket = null;
+    private static Socket clientSocket = null;
+    private static InputStream in = null;
+
     private static void setupDecoder(Surface decoderSurface) throws IOException {
         decoder = MediaCodec.createDecoderByType("video/avc");
-        MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1080, 1920);
+        MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1080, 2220);
         decoder.configure(format, decoderSurface, null, 0);
         decoder.start();
     }
 
     private static void listen() throws IOException {
-        ServerSocket serverSocket = new ServerSocket(portNumber);
-        serverSocket.setReceiveBufferSize(1048576);
-        Socket clientSocket = serverSocket.accept();
-        clientSocket.setReceiveBufferSize(1048576);
-        clientSocket.setSendBufferSize(1048576);
+        serverSocket = new ServerSocket(portNumber);
+        serverSocket.setReceiveBufferSize(65536);
+        clientSocket = serverSocket.accept();
+        clientSocket.setReceiveBufferSize(65536);
+        clientSocket.setSendBufferSize(65536);
         //PrintWriter out =
           //      new PrintWriter(clientSocket.getOutputStream(), true);
         //BufferedReader in = new BufferedReader(
@@ -51,32 +60,51 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         //DataInputStream in = new DataInputStream(clientSocket.getInputStream());
         //InputStream in = clientSocket.getInputStream();
         //BufferedInputStream in
-        InputStream in = new BufferedInputStream(clientSocket.getInputStream(), 64*1024);
+        in = new BufferedInputStream(clientSocket.getInputStream());
 
-        byte buf[] = new byte[1048576];
-        int total = 0;
-        int read;
+        byte buf[] = new byte[40 * 1048576]; // 20 Mbps * 2
+        final byte nal[] = { 0x00, 0x00, 0x00, 0x01};
+        int total = 4;
+        int read = 0;
         int inputIndex, outIndex;
+        int i = 0;
         ByteBuffer inputBuffer;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-        while ((read = in.read(buf, 0, 1048576)) != -1) {
-            Log.e(Streamer.APP_NAME, "Read " + read + " bytes");
+        buf[0] = 0x00;
+        buf[1] = 0x00;
+        buf[2] = 0x00;
+        buf[3] = 0x01;
+        while ((read = in.read(buf, total, 4)) != -1) {
+            total += read;
+            if (buf[total - 4] != 0x00 ||
+                    buf[total - 3] != 0x00 ||
+                    buf[total - 2] != 0x00 ||
+                    buf[total - 1] != 0x01)
+                continue;
+
+            Log.e(Streamer.APP_NAME, "Read " + total + " bytes");
 
             inputIndex = decoder.dequeueInputBuffer(10000);
             if (inputIndex < 0)
                continue;
 
             inputBuffer = decoder.getInputBuffer(inputIndex);
-            inputBuffer.put(buf, 0, read);
+            inputBuffer.put(buf, 0, total);
 
             /*
             inputBuffer = decoder.getInputBuffers()[inputIndex];
             inputBuffer.put(buf, 0, read);
             */
 
-            Log.e(Streamer.APP_NAME, "Total: " + total);
-            decoder.queueInputBuffer(inputIndex, 0, read, 0, 0);
+            decoder.queueInputBuffer(inputIndex, 0, total, 0, 0);
+
+            //Arrays.fill(buf, (byte)0);
+            buf[0] = 0x00;
+            buf[1] = 0x00;
+            buf[2] = 0x00;
+            buf[3] = 0x01;
+            total = 4;
 
             outIndex = decoder.dequeueOutputBuffer(info, 0);
 
@@ -96,6 +124,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
                 default:
                     Log.d(Streamer.APP_NAME, "Rendering: " + outIndex);
                     decoder.releaseOutputBuffer(outIndex, true);
+                    //decoder.flush();
                     break;
             }
 
@@ -104,14 +133,6 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
                 break;
             }
         }
-
-        decoder.stop();
-        decoder.release();
-
-        in.close();
-        //out.close();
-        clientSocket.close();
-        serverSocket.close();
     }
 
     @Override
@@ -119,6 +140,8 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         super.onCreate(savedInstanceState);
 
         setContentView(R.layout.activity_fullscreen);
+
+        //getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
 
         SurfaceView sv = findViewById(R.id.surfaceView);
         sv.getHolder().addCallback(this);
@@ -163,6 +186,17 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
                     listen();
                 } catch (Exception e) {
                     Log.e(Streamer.APP_NAME, "Exception while listening!", e);
+                }
+
+                try {
+                    decoder.stop();
+                    decoder.release();
+
+                    in.close();
+                    clientSocket.close();
+                    serverSocket.close();
+                } catch (Exception e) {
+                    // Ignore
                 }
 
                 Utils.sleep(1000);
