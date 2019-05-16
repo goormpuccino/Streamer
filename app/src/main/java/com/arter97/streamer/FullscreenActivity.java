@@ -37,7 +37,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
 
     private static ServerSocket serverSocket = null;
     private static Socket clientSocket = null;
-    private static BufferedInputStream in = null;
+    private static InputStream in = null;
 
     private static void setupDecoder(Surface decoderSurface) throws IOException {
         decoder = MediaCodec.createDecoderByType("video/avc");
@@ -47,26 +47,23 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
     }
 
     private static void listen() throws IOException {
-        final int unit = 64 * 1024;
-
         serverSocket = new ServerSocket(portNumber);
-        serverSocket.setReceiveBufferSize(unit);
+        serverSocket.setReceiveBufferSize(65536);
         clientSocket = serverSocket.accept();
-        clientSocket.setReceiveBufferSize(unit);
-        clientSocket.setSendBufferSize(unit);
+        clientSocket.setReceiveBufferSize(65536);
+        clientSocket.setSendBufferSize(65536);
         //PrintWriter out =
-        //      new PrintWriter(clientSocket.getOutputStream(), true);
+          //      new PrintWriter(clientSocket.getOutputStream(), true);
         //BufferedReader in = new BufferedReader(
-        //      new InputStreamReader(clientSocket.getInputStream()));
+          //      new InputStreamReader(clientSocket.getInputStream()));
 
         //DataInputStream in = new DataInputStream(clientSocket.getInputStream());
         //InputStream in = clientSocket.getInputStream();
         //BufferedInputStream in
         in = new BufferedInputStream(clientSocket.getInputStream());
-        in.mark(unit);
 
         byte buf[] = new byte[40 * 1048576]; // 20 Mbps * 2
-        final byte nal[] = {0x00, 0x00, 0x00, 0x01};
+        final byte nal[] = { 0x00, 0x00, 0x00, 0x01};
         int total = 4;
         int read = 0;
         int inputIndex, outIndex;
@@ -74,72 +71,41 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         ByteBuffer inputBuffer;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-        while (true) {
-            inputIndex = decoder.dequeueInputBuffer(10000);
-            if (inputIndex < 0)
+        buf[0] = 0x00;
+        buf[1] = 0x00;
+        buf[2] = 0x00;
+        buf[3] = 0x01;
+        while ((read = in.read(buf, total, 4)) != -1) {
+            total += read;
+            if (buf[total - 4] != 0x00 ||
+                    buf[total - 3] != 0x00 ||
+                    buf[total - 2] != 0x00 ||
+                    buf[total - 1] != 0x01)
                 continue;
 
+            Log.e(Streamer.APP_NAME, "Read " + total + " bytes");
+
+            inputIndex = decoder.dequeueInputBuffer(10000);
+            if (inputIndex < 0)
+               continue;
+
             inputBuffer = decoder.getInputBuffer(inputIndex);
+            inputBuffer.put(buf, 0, total);
 
             /*
+            inputBuffer = decoder.getInputBuffers()[inputIndex];
+            inputBuffer.put(buf, 0, read);
+            */
+
+            decoder.queueInputBuffer(inputIndex, 0, total, 0, 0);
+
+            //Arrays.fill(buf, (byte)0);
             buf[0] = 0x00;
             buf[1] = 0x00;
             buf[2] = 0x00;
             buf[3] = 0x01;
             total = 4;
-            while ((read = in.read(buf, total, 4)) != -1) {
-                total += read;
-                if (buf[total - 4] == 0x00 &&
-                        buf[total - 3] == 0x00 &&
-                        buf[total - 2] == 0x00 &&
-                        buf[total - 1] == 0x01)
-                    break;
-            }
-            */
 
-            //inputBuffer.put(nal);
-            //inputBuffer.position(4);
-
-            total = 0;
-            in.skip(4);
-            while ((read = in.read(buf, total, unit)) != -1) {
-                Log.e(Streamer.APP_NAME, "Read: " + read);
-
-                i = Bytes.indexOf(buf, nal);
-                if (i != -1) {
-                    Log.e(Streamer.APP_NAME, "Total: " + total);
-                    Log.e(Streamer.APP_NAME, "Offset: " + i);
-                    inputBuffer.put(nal, 0, 4);
-                    inputBuffer.put(buf, 0, i);
-
-                    buf[i+1] |= 0x1;
-
-                    in.reset();
-                    Log.e(Streamer.APP_NAME, "Skipping " + (i - total + 4));
-                    in.skip(i - total);
-
-                    int a;
-                    a = in.read();
-                    Log.e(Streamer.APP_NAME, "1: " + a);
-                    a = in.read();
-                    Log.e(Streamer.APP_NAME, "2: " + a);
-                    a = in.read();
-                    Log.e(Streamer.APP_NAME, "3: " + a);
-                    a = in.read();
-                    Log.e(Streamer.APP_NAME, "4: " + a);
-
-                    total += read;
-                    break;
-                }
-                total += read;
-            }
-
-
-
-            Log.e(Streamer.APP_NAME, "Total " + total + " bytes");
-
-            //inputBuffer.put(buf, 0, total);
-            decoder.queueInputBuffer(inputIndex, 0, total, 0, 0);
             outIndex = decoder.dequeueOutputBuffer(info, 0);
 
             switch (outIndex) {
