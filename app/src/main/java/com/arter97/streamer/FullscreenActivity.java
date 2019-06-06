@@ -17,6 +17,8 @@ import android.view.WindowManager;
 
 import com.google.common.primitives.Bytes;
 
+import org.jcodec.codecs.h264.H264Utils;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.DataInputStream;
@@ -46,16 +48,26 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         decoder.start();
     }
 
+    private static final int bufsize = 128 * 1024;
+    private final static char[] hexArray = "0123456789ABCDEF".toCharArray();
+    public static String bytesToHex(byte[] bytes) {
+        char[] hexChars = new char[bytes.length * 2];
+        for ( int j = 0; j < bytes.length; j++ ) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = hexArray[v >>> 4];
+            hexChars[j * 2 + 1] = hexArray[v & 0x0F];
+        }
+        return new String(hexChars);
+    }
     private static void listen() throws IOException {
         serverSocket = new ServerSocket(portNumber);
-        serverSocket.setReceiveBufferSize(65536);
+        serverSocket.setReceiveBufferSize(bufsize);
         clientSocket = serverSocket.accept();
-        clientSocket.setReceiveBufferSize(65536);
-        clientSocket.setSendBufferSize(65536);
+        clientSocket.setTcpNoDelay(true);
         //PrintWriter out =
-          //      new PrintWriter(clientSocket.getOutputStream(), true);
+        //      new PrintWriter(clientSocket.getOutputStream(), true);
         //BufferedReader in = new BufferedReader(
-          //      new InputStreamReader(clientSocket.getInputStream()));
+        //      new InputStreamReader(clientSocket.getInputStream()));
 
         //DataInputStream in = new DataInputStream(clientSocket.getInputStream());
         //InputStream in = clientSocket.getInputStream();
@@ -63,49 +75,49 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         in = new BufferedInputStream(clientSocket.getInputStream());
 
         byte buf[] = new byte[40 * 1048576]; // 20 Mbps * 2
-        final byte nal[] = { 0x00, 0x00, 0x00, 0x01};
-        int total = 4;
+        final byte nal[] = {0x00, 0x00, 0x00, 0x01};
+        int total = 0;
         int read = 0;
         int inputIndex, outIndex;
         int i = 0;
         ByteBuffer inputBuffer;
+        ByteBuffer readBuffer = ByteBuffer.allocateDirect(bufsize * 10);
+        byte readbuf[] = readBuffer.array();
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-        buf[0] = 0x00;
-        buf[1] = 0x00;
-        buf[2] = 0x00;
-        buf[3] = 0x01;
-        while ((read = in.read(buf, total, 1)) != -1) {
-            total += read;
-            if (buf[total - 4] != 0x00 ||
-                    buf[total - 3] != 0x00 ||
-                    buf[total - 2] != 0x00 ||
-                    buf[total - 1] != 0x01)
-                continue;
+        Runnable readRunnable = new readThread(readbuf);
+        Thread readThread = new Thread(readRunnable);
+        readThread.start();
 
-            Log.e(Streamer.APP_NAME, "Read " + total + " bytes");
+        while ((read = in.read(readbuf, total, bufsize)) != -1) {
+            total += read;
+//            Log.e(Streamer.APP_NAME, "Size: " + readbuf);
+            NALUnitReader in = new NALUnitReader(is);
+
+            ByteBuffer nalbuf = H264Utils.nextNALUnit(readBuffer);
+            if (nalbuf == null) {
+                Log.e(Streamer.APP_NAME, "Loop");
+                continue;
+            }
+
+            Log.e(Streamer.APP_NAME, "Went inside: " + nalbuf.array().length);
+            Log.e(Streamer.APP_NAME, "Went inside: " + bytesToHex(nalbuf.array()));
+            readBuffer.clear();
+            total = 0;
 
             do {
                 inputIndex = decoder.dequeueInputBuffer(10000);
             } while (inputIndex < 0);
 
             inputBuffer = decoder.getInputBuffer(inputIndex);
-            inputBuffer.put(buf, 0, total);
+            inputBuffer.put(nalbuf);
+            //inputBuffer.put(buf, 0, total);
 
             /*
             inputBuffer = decoder.getInputBuffers()[inputIndex];
             inputBuffer.put(buf, 0, read);
             */
-
-            decoder.queueInputBuffer(inputIndex, 0, total, 0, 0);
-
-            //Arrays.fill(buf, (byte)0);
-            buf[0] = 0x00;
-            buf[1] = 0x00;
-            buf[2] = 0x00;
-            buf[3] = 0x01;
-            total = 4;
-
+            decoder.queueInputBuffer(inputIndex, 0, nalbuf.remaining(), 0, 0);
             outIndex = decoder.dequeueOutputBuffer(info, 10000);
 
             switch (outIndex) {
@@ -131,6 +143,27 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
             if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                 Log.d(Streamer.APP_NAME, "BUFFER_FLAG_END_OF_STREAM");
                 break;
+            }
+        }
+    }
+
+    private static class readThread implements Runnable {
+        private byte[] readbuf;
+        int read = 0;
+        readThread(byte[] readbuf) {
+            this.readbuf = readbuf;
+        }
+
+        @Override
+        public void run() {
+            int total = 0;
+            try {
+                while ((read = in.read(readbuf, total, bufsize)) != -1) {
+                    total += read;
+                    Log.d(Streamer.APP_NAME, "Read " + read);
+                }
+            } catch (Exception e) {
+                Log.e(Streamer.APP_NAME, "Read exception", e);
             }
         }
     }
