@@ -1,13 +1,17 @@
 package com.arter97.streamer;
 
 import android.annotation.SuppressLint;
+import android.graphics.Point;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.support.v7.app.ActionBar;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.os.Handler;
+import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Display;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -17,16 +21,22 @@ import android.view.WindowManager;
 
 import com.google.common.primitives.Bytes;
 
+import org.jcodec.codecs.h264.H264Utils;
+import org.jcodec.codecs.h264.io.model.SeqParameterSet;
+import org.jcodec.codecs.h264.io.model.VUIParameters;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.spec.ECField;
 import java.util.Arrays;
 
@@ -38,20 +48,62 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
     private static ServerSocket serverSocket = null;
     private static Socket clientSocket = null;
     private static InputStream in = null;
+    private boolean infoSent = false;
+
+    public void writeInfo(String ip) {
+        Socket socket = null;
+        OutputStreamWriter osw;
+        String str;
+
+        Display display = getWindowManager().getDefaultDisplay();
+        Point size = new Point();
+        display.getRealSize(size);
+        int width = size.x;
+        int height = size.y;
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int screenDensity = metrics.densityDpi;
+
+        str = String.format("%d1%d1%d1", width, height, screenDensity);
+        Log.e(Streamer.APP_NAME, "Info send: " + str);
+
+        try {
+            socket = new Socket(ip, 5568);
+            osw = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+            osw.write(str, 0, 14);
+            osw.flush();
+            osw.close();
+            socket.close();
+        } catch (Exception e) {
+            Log.e(Streamer.APP_NAME, "Server write info failed", e);
+        } finally {
+            try {
+                socket.close();
+            } catch (Exception e) {
+                // Do nothing
+            }
+        }
+    }
 
     private static void setupDecoder(Surface decoderSurface) throws IOException {
         decoder = MediaCodec.createDecoderByType("video/avc");
         MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1080, 2280);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            format.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE);
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,1); // 0.5MB but adjust it as you need.
+        format.setInteger(MediaFormat.KEY_MAX_WIDTH, 1920);
+        format.setInteger(MediaFormat.KEY_MAX_HEIGHT, 1080);
+//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+//            format.setInteger(MediaFormat.KEY_ROTATION, 90);
+
         decoder.configure(format, decoderSurface, null, 0);
         decoder.start();
     }
 
-    private static void listen() throws IOException {
+    private void listen() throws IOException {
         serverSocket = new ServerSocket(portNumber);
-        serverSocket.setReceiveBufferSize(65536);
+        serverSocket.setReceiveBufferSize(128 * 1024);
         clientSocket = serverSocket.accept();
-        clientSocket.setReceiveBufferSize(65536);
-        clientSocket.setSendBufferSize(65536);
         //PrintWriter out =
           //      new PrintWriter(clientSocket.getOutputStream(), true);
         //BufferedReader in = new BufferedReader(
@@ -71,22 +123,76 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
         ByteBuffer inputBuffer;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
+        do {
+            inputIndex = decoder.dequeueInputBuffer(10000);
+        } while (inputIndex < 0);
+
+        inputBuffer = decoder.getInputBuffer(inputIndex);
+        inputBuffer.put(new byte[] { 0x00, 0x00, 0x00, 0x01, 0x67 }, 0, 5);
+        decoder.queueInputBuffer(inputIndex, 0, 5, 0, 0);
+        decoder.dequeueOutputBuffer(info, 10000);
+
         buf[0] = 0x00;
         buf[1] = 0x00;
         buf[2] = 0x00;
         buf[3] = 0x01;
         while ((read = in.read(buf, total, 1)) != -1) {
+            if (!infoSent) {
+                writeInfo(clientSocket.getInetAddress().getHostAddress());
+                infoSent = true;
+            }
+
             total += read;
-            if (buf[total - 4] != 0x00 ||
+            if ((buf[total - 4] != 0x00 ||
                     buf[total - 3] != 0x00 ||
                     buf[total - 2] != 0x00 ||
-                    buf[total - 1] != 0x01)
+                    buf[total - 1] != 0x01))
                 continue;
+
+            if (false /*buf[4] == 0x67*/) {
+                Log.e(Streamer.APP_NAME, "SPS detected");
+
+                ByteBuffer spsBuf = ByteBuffer.wrap(buf);
+                spsBuf.position(5);
+                SeqParameterSet sps = H264Utils.readSPS(spsBuf);
+
+                Log.e(Streamer.APP_NAME, "idc: " + sps.levelIdc);
+                Log.e(Streamer.APP_NAME, "refframe: " + sps.numRefFrames);
+                Log.e(Streamer.APP_NAME, "profileidc: " + sps.profileIdc);
+
+                sps.levelIdc = 42;
+                sps.numRefFrames = 1;
+                sps.vuiParams.videoSignalTypePresentFlag = false;
+                sps.vuiParams.colourDescriptionPresentFlag = false;
+                sps.vuiParams.chromaLocInfoPresentFlag = false;
+                if (sps.vuiParams.bitstreamRestriction == null) {
+                    sps.vuiParams.bitstreamRestriction = new VUIParameters.BitstreamRestriction();
+                    sps.vuiParams.bitstreamRestriction.motionVectorsOverPicBoundariesFlag = true;
+                    sps.vuiParams.bitstreamRestriction.log2MaxMvLengthHorizontal = 16;
+                    sps.vuiParams.bitstreamRestriction.log2MaxMvLengthVertical = 16;
+                    sps.vuiParams.bitstreamRestriction.numReorderFrames = 0;
+                    sps.vuiParams.bitstreamRestriction.maxDecFrameBuffering = sps.numRefFrames;
+                    sps.vuiParams.bitstreamRestriction.maxBytesPerPicDenom = 2;
+                    sps.vuiParams.bitstreamRestriction.maxBitsPerMbDenom = 1;
+                }
+
+                ByteBuffer escapedNalu = H264Utils.writeSPS(sps, total);
+
+                // Batch this to submit together with PPS
+                byte[] spsBuffer = new byte[5 + escapedNalu.limit()];
+                System.arraycopy(buf, 0, spsBuffer, 0, 5);
+                escapedNalu.get(spsBuffer, 5, escapedNalu.limit());
+
+                spsBuf = ByteBuffer.wrap(buf);
+                spsBuf.position(5);
+                sps = H264Utils.readSPS(spsBuf);
+                Log.e(Streamer.APP_NAME, "SPS: " + sps.toString());
+            }
 
             Log.e(Streamer.APP_NAME, "Read " + total + " bytes");
 
             do {
-                inputIndex = decoder.dequeueInputBuffer(10000);
+                inputIndex = decoder.dequeueInputBuffer(100);
             } while (inputIndex < 0);
 
             inputBuffer = decoder.getInputBuffer(inputIndex);
@@ -106,7 +212,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
             buf[3] = 0x01;
             total = 4;
 
-            outIndex = decoder.dequeueOutputBuffer(info, 10000);
+            outIndex = decoder.dequeueOutputBuffer(info, 100);
 
             switch (outIndex) {
                 case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
@@ -123,7 +229,7 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
 
                 default:
                     Log.d(Streamer.APP_NAME, "Rendering: " + outIndex);
-                    decoder.releaseOutputBuffer(outIndex, true);
+                    decoder.releaseOutputBuffer(outIndex, 0);
                     //decoder.flush();
                     break;
             }
@@ -133,6 +239,8 @@ public class FullscreenActivity extends AppCompatActivity implements SurfaceHold
                 break;
             }
         }
+
+        infoSent = false;
     }
 
     @Override
